@@ -1,13 +1,17 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <ctype.h>
 
 #include "csv.h"
 
 static int csv_parse(FILE* csvfile, char delim);
 static int csv_read(FILE* csvfile, _row_t rows, struct _column_s* columns, size_t* row_l, size_t* col_l);
 static char* readline(FILE* file, size_t* out_size);
-static size_t str_split(const char* str, char delim);
+static size_t str_split(const char* str, char delim, int trim, char*** out);
+static void str_split_free(char** list, size_t len);
+static char* ltrim(const char* str);
+static char* rtrim(const char* str);
 
 int csv_open(const char* filename, char delim, CsvFile* out) {
     if (!filename || !out) {
@@ -21,9 +25,9 @@ int csv_open(const char* filename, char delim, CsvFile* out) {
     int err = csv_parse(csvfile, delim);
     if (err != 0) {
         if (err == -1) {
-            fprintf(stderr, "csv_parse: malformed csv (empty file), delimiter %c\n", delim);
+            fprintf(stderr, "csv_parse: Malformed csv (empty file), delimiter %c\n", delim);
         } else if (err >= 1) {
-            fprintf(stderr, "csv parse: malformed csv (items in row %d don't match with number of columns), delimiter %c\n", err, delim);
+            fprintf(stderr, "csv parse: Malformed csv (items in row %d don't match with number of columns), delimiter %c\n", err, delim);
         }
         fclose(csvfile);
         return 1;
@@ -65,10 +69,10 @@ static int csv_parse(FILE* csvfile, char delim) {
     }
 
     // columns
-    char* token = strtok(line, delim);
+    char* token = strtok(line, delim_str);
     size_t col_count = token ? 1 : 0;
     while (token) {
-        token = strtok(NULL, delim);
+        token = strtok(NULL, delim_str);
         col_count++;
     }
     free(line);
@@ -76,18 +80,117 @@ static int csv_parse(FILE* csvfile, char delim) {
     // rows
     while ((line = readline(csvfile, &line_len))) {
         line_count++;
-        token = strtok(line, delim);
-        size_t item_count = token ? 1 : 0;
-        while (token) {
-            token = strtok(NULL, delim);
-            item_count++;
+        char** out = NULL;
+        size_t len = str_split(line, delim, 0, &out);
+        if (len == 1) {
+            if (*out == line) {
+                free(out);
+            } else {
+                str_split_free(out, len);
+            }
         }
         free(line);
-        if (item_count != col_count) {
+        if (len != col_count) {
             return line_count;
         }
     }
     return 0;
+}
+
+static char* ltrim(const char* str) {
+   while (isspace((unsigned int) *str)) str++;
+   return str;  
+}
+
+static char* rtrim(const char* str) {
+    char* stre = str + (strlen(str) - 1);
+    while (isspace((unsigned int) *stre)) stre--;
+    return stre + 1;
+}
+
+static size_t str_split(const char* str, char delim, int trim, char*** out) {
+    size_t bufsize = 10;
+    size_t count = 0;
+
+    char** buffer = calloc(1, sizeof(char*)); /* in case the result is the string itself */
+    if (!buffer) {
+        perror("malloc");
+        exit(EXIT_FAILURE);
+    }
+    
+    const char* strb = str;
+    char* del = strchr(str, (unsigned int) delim);
+    if (!del) {
+        buffer[count++] = str;
+        *out = buffer; 
+        return count;
+    }
+    char** tmp = realloc(buffer, sizeof(char*) * bufsize);
+    if (!tmp) {
+        perror("realloc");
+        exit(EXIT_FAILURE);
+    }
+    buffer = tmp;
+
+    size_t split_len = del - strb;
+    if (split_len != 0) {
+        buffer[count] = malloc(sizeof(char) * (split_len + 1));
+        strncpy(buffer[count], strb, split_len);
+        buffer[count][split_len] = 0;
+        count++;
+    }
+    strb = del + 1;
+    while ((del = strchr(strb, (unsigned int) delim))) {
+        split_len = del - strb;
+        if (split_len == 0) {
+            strb = del + 1;
+            continue;
+        }
+        buffer[count] = malloc(sizeof(char) * (split_len + 1));
+        strncpy(buffer[count], strb, split_len);
+        buffer[count][split_len] = 0;
+        strb = del + 1;
+        count++;
+        
+        if (count >= bufsize) {
+            bufsize *= 1.5f;
+            tmp = realloc(buffer, sizeof(char*) * bufsize);
+            if (!tmp) {
+                perror("realloc");
+                exit(EXIT_FAILURE);
+            }
+            buffer = tmp;
+        }
+    }
+    strb = strrchr(str, (unsigned int) delim) + 1;
+    del = str + strlen(str);
+
+    split_len = del - strb;
+    if (split_len != 0) {
+        buffer[count] = malloc(sizeof(char) * (split_len + 1));
+        strncpy(buffer[count], strb, split_len);
+        buffer[count][split_len] = 0;
+        count++;
+    }
+    if (count == 0) {
+        free(buffer);
+        *out = NULL;
+        return 0;
+    }
+    tmp = realloc(buffer, sizeof(char*) * count);
+    if (!tmp) {
+        perror("realloc");
+        exit(EXIT_FAILURE);
+    }
+    *out = tmp;
+    return count;
+}
+
+static void str_split_free(char** list, size_t len) {
+    for (size_t i = 0; i < len; i++) {
+        free(list[i]);
+    }
+    free(list);
 }
 
 static char* readline(FILE* file, size_t* out_size) {
@@ -135,9 +238,8 @@ static char* readline(FILE* file, size_t* out_size) {
 
     char* new_buf = realloc(buf, sizeof(char) * (buf_size + 1)); /* +1 for the null character */
     if (new_buf == NULL) {
-        free(buf);
-        *out_size = 0;
-        return NULL;
+        perror("realloc");
+        exit(EXIT_FAILURE);
     }
     buf = new_buf;
     buf[buf_size] = '\0';
